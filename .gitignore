@@ -1,0 +1,42 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+venv/
+ENV/
+env/
+
+# VS Code settings
+.vscode/
+
+# MacOS system files
+.DS_Store
+
+# Environment files (for secrets like AWS keys)
+.env
+.env.*
+
+# AWS credentials
+*.pem
+*.key
+*.crt
+*.csr
+
+# SSH keys
+*.pub
+id_rsa
+id_rsa.*
+id_dsa
+id_dsa.*
+
+# Logs
+*.log
+
+# Databases
+*.sqlite3
+*.db
+
+# Reports / Outputs
+reports/*.csv
+reports/*.xlsx
