@@ -15,7 +15,7 @@ class AWSClient:
         """
         self.access_key = access_key
         self.secret_key = secret_key
-        self.bucket_name = bucket_name
+        self.bucket_name = bucket_name    
         self.custom_ca_bundle = custom_ca_bundle
         self.s3 = self._initialize_s3_client()
 
