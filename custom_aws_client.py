@@ -1,101 +1,78 @@
 import os
 import boto3
-import py7zr
+import logging
+import zstandard as zstd
+import pandas as pd
 import io
-
+import pyarrow.parquet as pq
+from botocore.config import Config
+from ssl_config import ssl_configured
 
 class AWSClient:
-    def __init__(self, access_key, secret_key, bucket_name, custom_ca_bundle=None):
-        """
-        Initialize the AWS client with credentials and bucket name.
-        :param access_key: AWS Access Key ID
-        :param secret_key: AWS Secret Access Key
-        :param bucket_name: Name of the S3 bucket
-        :param custom_ca_bundle: Path to custom CA bundle for SSL verification
-        """
+    def __init__(self, access_key, secret_key, bucket_name="datalogs-processed-timeseries"):
         self.access_key = access_key
         self.secret_key = secret_key
-        self.bucket_name = bucket_name    
-        self.custom_ca_bundle = custom_ca_bundle
+        self.bucket_name = bucket_name
         self.s3 = self._initialize_s3_client()
 
     def _initialize_s3_client(self):
-        """
-        Initialize the S3 client with optional custom CA bundle.
-        :return: boto3 S3 client
-        """
         try:
-            # if self.custom_ca_bundle and os.path.exists(self.custom_ca_bundle):
-            #     return boto3.client(
-            #         "s3",
-            #         aws_access_key_id=self.access_key,
-            #         aws_secret_access_key=self.secret_key,
-            #         verify=self.custom_ca_bundle
-            #     )
-            # else:
-            # Use certifi's CA bundle by default
-            import certifi
+            if not ssl_configured:
+                logging.warning("SSL not properly configured, using less secure connection")
+            
             return boto3.client(
                 "s3",
                 aws_access_key_id=self.access_key,
                 aws_secret_access_key=self.secret_key,
-                verify=certifi.where()
+                config=Config(
+                    connect_timeout=30,
+                    retries={'max_attempts': 3},
+                    s3={'addressing_style': 'path'}
+                ),
+                region_name='ap-south-1'  # Explicitly set your region
             )
         except Exception as e:
-            raise RuntimeError(f"Failed to initialize S3 client: {e}")
+            logging.error(f"Failed to initialize S3 client: {str(e)}", exc_info=True)
+            raise RuntimeError(f"Failed to initialize S3 client: {str(e)}")
 
     def get_available_logs(self, imei):
-        """
-        Retrieve all .7z log files for the given IMEI from the S3 bucket.
-        :param imei: The IMEI of the bike
-        :return: List of log file paths
-        """
+        """Retrieve all .parquet.zst log files for the given IMEI"""
         try:
-            base_path = f"vehicles/vcu_logs_{imei}"
-            all_log_files = []
-            # Traverse the directory structure
-            date_folders = self.s3.list_objects_v2(Bucket=self.bucket_name, Prefix=base_path).get("Contents", [])
-            for date_folder in date_folders:
-                date_key = date_folder["Key"]
-                day_folders = self.s3.list_objects_v2(Bucket=self.bucket_name, Prefix=date_key).get("Contents", [])
-                for day_folder in day_folders:
-                    day_key = day_folder["Key"]
-                    time_folders = self.s3.list_objects_v2(Bucket=self.bucket_name, Prefix=day_key).get("Contents", [])
-                    for time_folder in time_folders:
-                        time_key = time_folder["Key"]
-                        files = self.s3.list_objects_v2(Bucket=self.bucket_name, Prefix=time_key).get("Contents", [])
-                        for file in files:
-                            if file["Key"].endswith(".7z"):
-                                all_log_files.append(file["Key"])
-            return all_log_files
+            base_path = f"vcu/MD-{imei}"
+            response = self.s3.list_objects_v2(
+                Bucket=self.bucket_name,
+                Prefix=base_path
+            )
+            
+            log_files = []
+            for content in response.get('Contents', []):
+                if content['Key'].endswith('.parquet.zst'):
+                    log_files.append(content['Key'])
+            
+            return log_files
         except Exception as e:
-            print(f"Error retrieving logs: {e}")
-            return []
+            logging.error(f"Error retrieving logs for IMEI {imei}: {str(e)}", exc_info=True)
+            raise RuntimeError(f"Failed to retrieve logs: {str(e)}")
 
-    def download_log_file(self, imei, log_path):
-        """
-        Download a specific log file for the given IMEI.
-        :param imei: The IMEI of the bike
-        :param log_path: The S3 key of the log file
-        :return: BytesIO object containing the downloaded file data
-        """
+    def download_log_file(self, log_path):
+        """Download and return log file content"""
         try:
-            response = self.s3.get_object(Bucket=self.bucket_name, Key=log_path)
-            return response["Body"].read()
+            response = self.s3.get_object(
+                Bucket=self.bucket_name,
+                Key=log_path
+            )
+            return response['Body'].read()
         except Exception as e:
-            print(f"Error downloading log file: {e}")
-            return None
+            logging.error(f"Error downloading log file {log_path}: {str(e)}", exc_info=True)
+            raise RuntimeError(f"Failed to download log file: {str(e)}")
 
     def extract_archive(self, archive_data):
-        """
-        Extract a .7z archive into memory.
-        :param archive_data: BytesIO object containing the .7z archive data
-        :return: Dictionary of extracted files (file_name: content)
-        """
+        """Extract Zstandard compressed parquet data"""
         try:
-            with py7zr.SevenZipFile(archive_data, "r") as archive:
-                extracted_files = archive.readall()
-            return extracted_files
+            dctx = zstd.ZstdDecompressor()
+            decompressed_data = dctx.decompress(archive_data)
+            parquet_file = io.BytesIO(decompressed_data)
+            return pq.read_table(parquet_file).to_pandas()
         except Exception as e:
-            print(f"Error extracting archive: {e}")
-            return {}
+            logging.error(f"Error extracting archive: {str(e)}", exc_info=True)
+            raise RuntimeError(f"Failed to extract archive: {str(e)}")

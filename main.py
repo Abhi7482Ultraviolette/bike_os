@@ -1,6 +1,11 @@
+import os
+
+# Set the SSL_CERT_FILE environment variable to the path of your cacert.pem file
+os.environ['SSL_CERT_FILE'] = os.path.join(os.path.dirname(__file__), 'cacert.pem')
 import sys
 from PyQt5.QtWidgets import QApplication
 from gui.login_window import LoginWindow
+
 
 class AppManager:
     def __init__(self):

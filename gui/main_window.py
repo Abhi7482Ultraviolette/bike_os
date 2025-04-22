@@ -1,13 +1,24 @@
 import os
+import certifi
+import ssl
+from ssl_config import configure_ssl
+
+# Configure SSL before anything else
+if not configure_ssl():
+    print("Warning: SSL configuration failed. Some features may not work.")
+
 import sys
 import io
-import py7zr
-import pandas as pd
 import logging
-import s3fs
+import pandas as pd
+from dotenv import load_dotenv  # Import load_dotenv
+import ssl
+import certifi
 
-# Initialize the S3 file system
-fs = s3fs.S3FileSystem()
+print("SSL Cert File Used:", ssl.get_default_verify_paths().openssl_cafile)
+print("Certifi Cert File:", certifi.where())
+
+
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
     QLabel, QPushButton, QFileDialog, QMessageBox, QSplitter, 
@@ -21,7 +32,6 @@ matplotlib.use('Qt5Agg')
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavigationToolbar
-
 # Import analysis functions
 from analysis.run_analysis import (
     temp_fluctuation_detection,
@@ -33,6 +43,9 @@ from analysis.run_analysis import (
 
 # Import AWSClient class
 from custom_aws_client import AWSClient
+
+# Load environment variables from .env file
+load_dotenv()  # Load the environment variables
 
 # Configure logging
 logging.basicConfig(
@@ -50,21 +63,19 @@ class AnalysisThread(QThread):
     progress = pyqtSignal(int, str)          # progress percentage, message
     error = pyqtSignal(str)                  # error message
 
-    def __init__(self, emcm_df, fgaux_df, ts_df):
+    def __init__(self, df):
         super().__init__()
-        self.emcm_df = emcm_df
-        self.fgaux_df = fgaux_df
-        self.ts_df = ts_df
+        self.df = df
 
     def run(self):
         try:
             results = {}
             self.progress.emit(20, "Analyzing temperature fluctuations...")
-            results['temp'] = temp_fluctuation_detection(self.ts_df)
+            results['temp'] = temp_fluctuation_detection(self.df)
             self.progress.emit(50, "Checking for solder issues...")
-            results['solder'] = solder_issue_detection(self.emcm_df)
+            results['solder'] = solder_issue_detection(self.df)
             self.progress.emit(80, "Checking for weld issues...")
-            results['weld'] = weld_issue_detection(self.emcm_df, self.fgaux_df)
+            results['weld'] = weld_issue_detection(self.df)
             self.progress.emit(100, "Analysis complete!")
             self.finished.emit(
                 results['solder'],
@@ -116,19 +127,26 @@ class MainWindow(QMainWindow):
         self.bike_imei = self.scanned_data.get('imei', 'N/A')
         self.bike_vin = self.scanned_data.get('vin', 'N/A')
         self.bike_uuid = self.scanned_data.get('uuid', 'N/A')
+
+        # Debug: Print SSL certificate paths
+        print("Using certifi CA Bundle:", certifi.where())
+        print("System SSL Cert File:", ssl.get_default_verify_paths().openssl_cafile)   
+
+        # Ensure no conflicting environment variables
+        if 'SSL_CERT_FILE' in os.environ:
+            del os.environ['SSL_CERT_FILE']
+
         # Initialize color attributes
         self.uv_blue = "#00C3FF"
         self.uv_dark = "#121212"
         self.uv_light = "#FFFFFF"
         self.uv_gray = "#333333"
         # Store analysis data
-        self.emcm_df = None
-        self.fgaux_df = None
-        self.ts_df = None
+        self.df = None
         # Initialize AWS client
         self.access_key = os.getenv("AWS_ACCESS_KEY_ID")
         self.secret_key = os.getenv("AWS_SECRET_ACCESS_KEY")
-        self.bucket_name = os.getenv("BUCKET_NAME", "vehiclelogs.ultraviolette.com")
+        self.bucket_name = os.getenv("BUCKET_NAME", "datalogs-processed-timeseries")
         self.aws_client = AWSClient(self.access_key, self.secret_key, self.bucket_name)
         # Initialize UI
         self.init_ui()
@@ -574,25 +592,10 @@ class MainWindow(QMainWindow):
             return
         try:
             # Fetch log files from AWS
-            vehicle_path = f'vehicles/vcu_logs_{self.bike_imei}'
-            full_s3_path = f's3://{self.bucket_name}/{vehicle_path}'
-            if not fs.exists(full_s3_path):
-                print(f"⚠ IMEI {self.bike_imei} not found in database")
-                return
-            date_folders = fs.ls(full_s3_path)
-            for date_folder in date_folders:
-                try:
-                    day_folders = fs.ls(date_folder)
-                    for day_folder in day_folders:
-                        time_folders = fs.ls(day_folder)
-                        for time_folder in time_folders:
-                            files = fs.ls(time_folder)
-                            for f in files:
-                                if 'output' in f and f.endswith('.7z'):
-                                    self.log_files_list.addItem(f)
-                except Exception as e:
-                    print(f"⚠ Folder traversal error: {str(e)}")
-                    continue
+            log_files = self.aws_client.get_available_logs(self.bike_imei)
+            for log_file in log_files:
+                parquet_file_name = log_file.split('/')[-1].replace('.parquet.zst', '.parquet')
+                self.log_files_list.addItem(parquet_file_name)
         except Exception as e:
             logging.error(f"Error fetching log files from AWS: {str(e)}", exc_info=True)
             self.status_label.setText("Failed to fetch log files from AWS.")
@@ -606,73 +609,26 @@ class MainWindow(QMainWindow):
             self.status_label.setText("Downloading and extracting log file...")
 
             # Download log file from AWS
-            log_data = self.aws_client.download_log_file(self.bike_imei, log_filename)
+            log_data = self.aws_client.download_log_file(log_filename)
             if not log_data:
                 raise ValueError("Failed to download log file.")
 
             self.status_label.setText("Extracting log file...")
-            extracted_files = self.aws_client.extract_archive(io.BytesIO(log_data))
+            df = self.aws_client.extract_archive(log_data)
 
-            # Define required files
-            required_files = {
-                "pack0_log_emcm.csv",
-                "pack0_log_fgaux.csv",
-                "pack0_log_ts.csv"
-            }
-
-            # Check if all required files are present
-            if not required_files.issubset(extracted_files.keys()):
-                missing = required_files - set(extracted_files.keys())
-                raise ValueError(f"Missing required files: {', '.join(missing)}")
-
-            # Define required columns with possible variants
+            # Validate columns
             required_columns = {
-                'pack0_log_emcm.csv': [
-                    ['DSG Current', 'dsg_current', 'dsg current'],
-                    ['CHG Current', 'chg_current', 'chg current']
-                ] + [[f'Cell{i}', f'cell{i}', f'cell {i}'] for i in range(1, 15)],
-
-                'pack0_log_fgaux.csv': [
-                    ['MAX_SOC', 'max_soc', 'soc']
-                ],
-
-                'pack0_log_ts.csv': [
-                    ['TS1', 'ts1'], ['TS2', 'ts2'], ['TS3', 'ts3'],
-                    ['TS4', 'ts4'], ['TS5', 'ts5'], ['TS6', 'ts6'],
-                    ['TS7', 'ts7'], ['TS8', 'ts8'], ['TS9', 'ts9'],
-                    ['TS10', 'ts10'], ['TS11', 'ts11'], ['TS12', 'ts12'],
-                    ['TS0_FLT', 'ts0_flt'], ['TS13_FLT', 'ts13_flt']
-                ]
+                'dsg_current', 'chg_current',
+                *[f'cell{i}' for i in range(1, 15)],
+                'max_soc',
+                *[f'ts{i}' for i in range(1, 13)],
+                'ts0_flt', 'ts13_flt'
             }
+            if not validate_columns(df, required_columns):
+                raise ValueError("Missing required columns in the log file.")
 
-            # Load and validate files
-            dfs = {}
-            for file in required_files:
-                content = io.BytesIO(extracted_files[file].getvalue())
-                dfs[file] = pd.read_csv(content)
-
-                # Normalize column names
-                dfs[file].columns = dfs[file].columns.str.strip().str.lower().str.replace(' ', '_')
-
-                # Validate columns
-                missing_cols = []
-                for col_variants in required_columns[file]:
-                    if not any(variant.lower().replace(' ', '_') in dfs[file].columns for variant in col_variants):
-                        missing_cols.append(col_variants[0])
-                if missing_cols:
-                    raise ValueError(
-                        f"Missing columns in {file}: {', '.join(missing_cols)}\n"
-                        f"Found columns: {', '.join(dfs[file].columns)}"
-                    )
-
-            # Assign validated data frames to class attributes
-            self.emcm_df = dfs['pack0_log_emcm.csv']
-            self.fgaux_df = dfs['pack0_log_fgaux.csv']
-            self.ts_df = dfs['pack0_log_ts.csv']
-
-            logging.debug(f"EMCM columns: {self.emcm_df.columns.tolist()}")
-            logging.debug(f"FGAUX columns: {self.fgaux_df.columns.tolist()}")
-            logging.debug(f"TS columns: {self.ts_df.columns.tolist()}")
+            # Assign validated DataFrame to class attributes
+            self.df = df
 
             # Start analysis thread
             self.start_analysis_thread()
@@ -684,7 +640,7 @@ class MainWindow(QMainWindow):
 
     def start_analysis_thread(self):
         """Start the analysis thread with the loaded data"""
-        self.analysis_thread = AnalysisThread(self.emcm_df, self.fgaux_df, self.ts_df)
+        self.analysis_thread = AnalysisThread(self.df)
         self.analysis_thread.progress.connect(self.update_progress)
         self.analysis_thread.finished.connect(self.show_results)
         self.analysis_thread.error.connect(self.show_error)
@@ -777,11 +733,11 @@ class MainWindow(QMainWindow):
             if temp_results["detected"]:
                 fig = Figure(figsize=(8, 4), dpi=100)
                 ax = fig.add_subplot(111)
-                for sensor in self.ts_df.columns:
+                for sensor in self.df.columns:
                     highlight = sensor in temp_results['critical_points']
                     ax.plot(
-                        self.ts_df.index,
-                        self.ts_df[sensor],
+                        self.df.index,
+                        self.df[sensor],
                         linewidth=3 if highlight else 1,
                         alpha=1.0 if highlight else 0.3,
                         label=sensor if highlight else None
@@ -792,7 +748,7 @@ class MainWindow(QMainWindow):
                 ax.legend()
                 ax.grid(True)
                 canvas = FigureCanvas(fig)
-                canvas.mpl_connect('button_press_event', lambda event: self.open_enlarged_graph(event, fig, f'Temperature Fluctuation - Sensor {", ".join(temp_results["critical_points"])}', 'Data Point Index', 'Temperature (°C)', self.ts_df.index, self.ts_df[sensor]))
+                canvas.mpl_connect('button_press_event', lambda event: self.open_enlarged_graph(event, fig, f'Temperature Fluctuation - Sensor {", ".join(temp_results["critical_points"])}', 'Data Point Index', 'Temperature (°C)', self.df.index, self.df[sensor]))
                 plots_layout.addWidget(canvas)
 
             # Solder plot (matches reference code - shows all cells)
@@ -804,20 +760,20 @@ class MainWindow(QMainWindow):
                 for cell in cell_cols:
                     highlight = cell in solder_results['locations']
                     ax.plot(
-                        self.emcm_df.index,
-                        self.emcm_df[cell],
+                        self.df.index,
+                        self.df[cell],
                         linewidth=3 if highlight else 1,
                         alpha=1.0 if highlight else 0.3,
                         label=cell if highlight else None
                     )
-                    y_data[cell] = self.emcm_df[cell]
+                    y_data[cell] = self.df[cell]
                 ax.set_title(f'IMEI {self.bike_imei} - Solder Issue - Cells {", ".join(solder_results["locations"])}', fontsize=10)
                 ax.set_xlabel('Data Point Index', fontsize=8)
                 ax.set_ylabel('Voltage (V)', fontsize=8)
                 ax.legend()
                 ax.grid(True)
                 canvas = FigureCanvas(fig)
-                canvas.mpl_connect('button_press_event', lambda event: self.open_enlarged_graph(event, fig, f'Solder Issue - Cells {", ".join(solder_results["locations"])}', 'Data Point Index', 'Voltage (V)', self.emcm_df.index, y_data))
+                canvas.mpl_connect('button_press_event', lambda event: self.open_enlarged_graph(event, fig, f'Solder Issue - Cells {", ".join(solder_results["locations"])}', 'Data Point Index', 'Voltage (V)', self.df.index, y_data))
                 plots_layout.addWidget(canvas)
 
             # Weld plot (matches reference code - highlights single cell)
@@ -829,8 +785,8 @@ class MainWindow(QMainWindow):
                 for cell in cell_cols:
                     if cell == faulty_cell:
                         ax.plot(
-                            self.emcm_df.index,
-                            self.emcm_df[cell],
+                            self.df.index,
+                            self.df[cell],
                             linewidth=3,
                             label=cell
                         )
@@ -839,9 +795,9 @@ class MainWindow(QMainWindow):
                 ax.set_ylabel('Voltage (V)', fontsize=8)
                 ax.legend()
                 ax.grid(True)
-                ax.text(0.02, 0.02, f'SOC: {self.fgaux_df["max_soc"].iloc[0]}%', transform=ax.transAxes, fontsize=8)
+                ax.text(0.02, 0.02, f'SOC: {self.df["max_soc"].iloc[0]}%', transform=ax.transAxes, fontsize=8)
                 canvas = FigureCanvas(fig)
-                canvas.mpl_connect('button_press_event', lambda event: self.open_enlarged_graph(event, fig, f'Weld Issue - Cell {faulty_cell}', 'Data Point Index', 'Voltage (V)', self.emcm_df.index, self.emcm_df[cell]))
+                canvas.mpl_connect('button_press_event', lambda event: self.open_enlarged_graph(event, fig, f'Weld Issue - Cell {faulty_cell}', 'Data Point Index', 'Voltage (V)', self.df.index, self.df[cell]))
                 plots_layout.addWidget(canvas)
 
             self.results_widget_layout.addWidget(plots_frame)
