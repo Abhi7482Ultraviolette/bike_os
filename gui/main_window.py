@@ -594,8 +594,12 @@ class MainWindow(QMainWindow):
             # Fetch log files from AWS
             log_files = self.aws_client.get_available_logs(self.bike_imei)
             for log_file in log_files:
-                parquet_file_name = log_file.split('/')[-1].replace('.parquet.zst', '.parquet')
-                self.log_files_list.addItem(parquet_file_name)
+                # Create display name (last part of path)
+                display_name = log_file.split('/')[-1].replace('.parquet.zst', '.parquet')
+                item = QListWidgetItem(display_name)
+                # Store full path as user data
+                item.setData(Qt.UserRole, log_file)
+                self.log_files_list.addItem(item)
         except Exception as e:
             logging.error(f"Error fetching log files from AWS: {str(e)}", exc_info=True)
             self.status_label.setText("Failed to fetch log files from AWS.")
@@ -603,13 +607,19 @@ class MainWindow(QMainWindow):
     def log_file_selected(self, item):
         """Handle log file selection with flexible column validation"""
         try:
-            log_filename = item.text()
+            # Get the full S3 key path from the item's data (not just text)
+            full_key = item.data(Qt.UserRole)  # Store full path as user data when populating
+            if not full_key:
+                # Fallback: Try to reconstruct from text (less reliable)
+                log_filename = item.text()
+                full_key = f"vcu/MD-{self.bike_imei}/{log_filename.replace('.parquet', '.parquet.zst')}"
+
             self.analysis_stack.setCurrentIndex(1)
             self.progress_bar.setValue(0)
             self.status_label.setText("Downloading and extracting log file...")
 
-            # Download log file from AWS
-            log_data = self.aws_client.download_log_file(log_filename)
+            # Download log file from AWS using full key path
+            log_data = self.aws_client.download_log_file(full_key)
             if not log_data:
                 raise ValueError("Failed to download log file.")
 

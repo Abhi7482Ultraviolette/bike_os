@@ -4,6 +4,9 @@ import certifi
 from pathlib import Path
 import logging
 
+# Configure logging
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+
 def configure_ssl():
     """Configure SSL settings for the entire application"""
     try:
@@ -15,8 +18,8 @@ def configure_ssl():
             raise FileNotFoundError(f"CA bundle not found at: {ca_bundle}")
         
         # Debug output
-        print(f"Using CA Bundle: {ca_bundle}")
-        print(f"CA Bundle exists: {Path(ca_bundle).exists()}")
+        logging.debug(f"Using CA Bundle: {ca_bundle}")
+        logging.debug(f"CA Bundle exists: {Path(ca_bundle).exists()}")
         
         # Create a custom SSL context
         ssl_context = ssl.create_default_context(cafile=ca_bundle)
@@ -30,11 +33,14 @@ def configure_ssl():
         os.environ['REQUESTS_CA_BUNDLE'] = ca_bundle
         
         return True
+    except FileNotFoundError as fnf_err:
+        logging.error(f"FileNotFoundError: {fnf_err}")
+        return False
     except Exception as e:
-        logging.error(f"SSL configuration failed: {str(e)}")
+        logging.error(f"SSL configuration failed: {str(e)}", exc_info=True)
         return False
 
 # Configure SSL when this module is imported
 ssl_configured = configure_ssl()
 if not ssl_configured:
-    print("Warning: SSL configuration failed. Falling back to system defaults.")
+    logging.warning("Warning: SSL configuration failed. Falling back to system defaults.")

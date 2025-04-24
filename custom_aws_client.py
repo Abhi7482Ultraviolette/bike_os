@@ -39,6 +39,8 @@ class AWSClient:
         """Retrieve all .parquet.zst log files for the given IMEI"""
         try:
             base_path = f"vcu/MD-{imei}"
+            logging.debug(f"Base path for IMEI {imei}: {base_path}")
+            
             response = self.s3.list_objects_v2(
                 Bucket=self.bucket_name,
                 Prefix=base_path
@@ -49,30 +51,60 @@ class AWSClient:
                 if content['Key'].endswith('.parquet.zst'):
                     log_files.append(content['Key'])
             
+            logging.debug(f"Found log files: {log_files}")
             return log_files
         except Exception as e:
             logging.error(f"Error retrieving logs for IMEI {imei}: {str(e)}", exc_info=True)
             raise RuntimeError(f"Failed to retrieve logs: {str(e)}")
-
+        
     def download_log_file(self, log_path):
-        """Download and return log file content"""
+        """Download and return log file content with better validation"""
         try:
+            # Log the bucket name and log path for debugging
+            logging.debug(f"Attempting to download log file: {log_path} from bucket: {self.bucket_name}")
+
+            # First verify the file exists
+            logging.debug(f"Checking if file exists: {log_path}")
+            self.s3.head_object(Bucket=self.bucket_name, Key=log_path)
+            
+            # Then download
+            logging.debug(f"Downloading file: {log_path}")
             response = self.s3.get_object(
                 Bucket=self.bucket_name,
                 Key=log_path
             )
             return response['Body'].read()
+        except self.s3.exceptions.NoSuchKey:
+            logging.error(f"Log file {log_path} not found in bucket {self.bucket_name}")
+            return None
         except Exception as e:
-            logging.error(f"Error downloading log file {log_path}: {str(e)}", exc_info=True)
-            raise RuntimeError(f"Failed to download log file: {str(e)}")
-
+            logging.error(f"Error downloading {log_path}: {str(e)}", exc_info=True)
+            return None
+        
     def extract_archive(self, archive_data):
         """Extract Zstandard compressed parquet data"""
         try:
             dctx = zstd.ZstdDecompressor()
-            decompressed_data = dctx.decompress(archive_data)
+            
+            # If archive_data is a StreamingBody (from S3), read it first
+            if hasattr(archive_data, 'read'):
+                archive_data = archive_data.read()
+                
+            # Create a streaming decompressor
+            reader = io.BytesIO(archive_data)
+            decompressor = dctx.stream_reader(reader)
+            
+            # Read all decompressed data
+            decompressed_data = b''
+            while True:
+                chunk = decompressor.read(16384)  # Read in chunks
+                if not chunk:
+                    break
+                decompressed_data += chunk
+                
             parquet_file = io.BytesIO(decompressed_data)
             return pq.read_table(parquet_file).to_pandas()
+            
         except Exception as e:
             logging.error(f"Error extracting archive: {str(e)}", exc_info=True)
             raise RuntimeError(f"Failed to extract archive: {str(e)}")
