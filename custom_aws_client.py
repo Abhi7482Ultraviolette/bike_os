@@ -82,29 +82,24 @@ class AWSClient:
             return None
         
     def extract_archive(self, archive_data):
-        """Extract Zstandard compressed parquet data"""
+        """Handle both actual zstd-compressed files and mislabeled parquet files"""
         try:
-            dctx = zstd.ZstdDecompressor()
-            
             # If archive_data is a StreamingBody (from S3), read it first
             if hasattr(archive_data, 'read'):
                 archive_data = archive_data.read()
-                
-            # Create a streaming decompressor
-            reader = io.BytesIO(archive_data)
-            decompressor = dctx.stream_reader(reader)
-            
-            # Read all decompressed data
-            decompressed_data = b''
-            while True:
-                chunk = decompressor.read(16384)  # Read in chunks
-                if not chunk:
-                    break
-                decompressed_data += chunk
-                
-            parquet_file = io.BytesIO(decompressed_data)
-            return pq.read_table(parquet_file).to_pandas()
-            
+
+            # Check if the data starts with Parquet magic bytes (b'PAR1')
+            if archive_data.startswith(b'PAR1'):
+                # It's actually a raw parquet file - read directly
+                parquet_file = io.BytesIO(archive_data)
+                return pq.read_table(parquet_file).to_pandas()
+            else:
+                # Try zstd decompression (for genuinely compressed files)
+                dctx = zstd.ZstdDecompressor()
+                decompressed_data = dctx.decompress(archive_data)
+                parquet_file = io.BytesIO(decompressed_data)
+                return pq.read_table(parquet_file).to_pandas()
+
         except Exception as e:
-            logging.error(f"Error extracting archive: {str(e)}", exc_info=True)
-            raise RuntimeError(f"Failed to extract archive: {str(e)}")
+            logging.error(f"Error processing file: {str(e)}", exc_info=True)
+            raise RuntimeError(f"Failed to process file: {str(e)}")
