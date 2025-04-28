@@ -7,6 +7,7 @@ import io
 import pyarrow.parquet as pq
 from botocore.config import Config
 from ssl_config import ssl_configured
+import numpy as np
 
 class AWSClient:
     def __init__(self, access_key, secret_key, bucket_name="datalogs-processed-timeseries"):

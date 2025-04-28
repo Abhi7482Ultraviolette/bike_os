@@ -46,12 +46,17 @@ def normalize_column_names(df):
     return df
 
 def validate_columns(df, required_columns):
-    """Case-insensitive column validation"""
-    available_cols = set(df.columns.str.lower())
-    missing = [col for col in required_columns if col.lower() not in available_cols]
+    """Enhanced column validation with detailed output"""
+    missing = [col for col in required_columns if col not in df.columns]
+    
     if missing:
-        logging.warning(f"Missing columns: {', '.join(missing)}")
+        print(f"\n[VALIDATION] Missing required columns:")
+        print(f"Expected: {required_columns}")
+        print(f"Actual: {df.columns.tolist()}")
+        print(f"Missing: {missing}\n")
         return False
+        
+    print(f"[VALIDATION] All required columns present")
     return True
 
 def temp_fluctuation_detection(parquet_data):

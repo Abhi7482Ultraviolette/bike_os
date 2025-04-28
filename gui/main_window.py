@@ -1,23 +1,12 @@
 import os
-import certifi
-import ssl
-from ssl_config import configure_ssl
-
-# Configure SSL before anything else
-if not configure_ssl():
-    print("Warning: SSL configuration failed. Some features may not work.")
-
 import sys
 import io
 import logging
 import pandas as pd
-from dotenv import load_dotenv  # Import load_dotenv
+import numpy as np
+from dotenv import load_dotenv
 import ssl
 import certifi
-
-print("SSL Cert File Used:", ssl.get_default_verify_paths().openssl_cafile)
-print("Certifi Cert File:", certifi.where())
-
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
@@ -27,11 +16,13 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtGui import QFont, QIcon, QColor, QPalette, QPixmap
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSize
+
 import matplotlib
 matplotlib.use('Qt5Agg')
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavigationToolbar
+
 # Import analysis functions
 from analysis.run_analysis import (
     temp_fluctuation_detection,
@@ -58,10 +49,10 @@ logging.basicConfig(
 )
 
 class AnalysisThread(QThread):
-    """Thread for running analysis in background"""
-    finished = pyqtSignal(dict, dict, dict)  # solder, weld, temp results
-    progress = pyqtSignal(int, str)          # progress percentage, message
-    error = pyqtSignal(str)                  # error message
+    """Thread for running analysis in background with enhanced logging"""
+    finished = pyqtSignal(dict, dict, dict)
+    progress = pyqtSignal(int, str)
+    error = pyqtSignal(str)
 
     def __init__(self, df):
         super().__init__()
@@ -69,23 +60,33 @@ class AnalysisThread(QThread):
 
     def run(self):
         try:
-            results = {}
+            # Data validation
+            if self.df is None or self.df.empty:
+                raise ValueError("Empty DataFrame provided for analysis")
+                
+            print("\n[ANALYSIS] Starting temperature analysis...")
             self.progress.emit(20, "Analyzing temperature fluctuations...")
-            results['temp'] = temp_fluctuation_detection(self.df)
+            temp_results = temp_fluctuation_detection(self.df)
+            print(f"[TEMP RESULTS] {temp_results}")
+            
+            print("\n[ANALYSIS] Starting solder analysis...")
             self.progress.emit(50, "Checking for solder issues...")
-            results['solder'] = solder_issue_detection(self.df)
+            solder_results = solder_issue_detection(self.df)
+            print(f"[SOLDER RESULTS] {solder_results}")
+            
+            print("\n[ANALYSIS] Starting weld analysis...")
             self.progress.emit(80, "Checking for weld issues...")
-            results['weld'] = weld_issue_detection(self.df)
+            weld_results = weld_issue_detection(self.df)
+            print(f"[WELD RESULTS] {weld_results}")
+            
             self.progress.emit(100, "Analysis complete!")
-            self.finished.emit(
-                results['solder'],
-                results['weld'],
-                results['temp']
-            )
+            self.finished.emit(solder_results, weld_results, temp_results)
+            
         except Exception as e:
-            logging.error(f"Analysis failed: {str(e)}", exc_info=True)
-            self.error.emit(f"Analysis failed: {str(e)}")
-
+            error_msg = f"Analysis Error: {str(e)}"
+            print(f"[ANALYSIS ERROR] {error_msg}")
+            logging.error(error_msg, exc_info=True)
+            self.error.emit(error_msg)
 
 class GraphDialog(QDialog):
     """Dialog to display enlarged graphs"""
@@ -119,7 +120,6 @@ class GraphDialog(QDialog):
         ax.grid(True)
         self.canvas.draw()
 
-
 class MainWindow(QMainWindow):
     def __init__(self, scanned_data=None):
         super().__init__()
@@ -128,96 +128,24 @@ class MainWindow(QMainWindow):
         self.bike_vin = self.scanned_data.get('vin', 'N/A')
         self.bike_uuid = self.scanned_data.get('uuid', 'N/A')
 
-        # Debug: Print SSL certificate paths
-        print("Using certifi CA Bundle:", certifi.where())
-        print("System SSL Cert File:", ssl.get_default_verify_paths().openssl_cafile)   
-
-        # Ensure no conflicting environment variables
-        if 'SSL_CERT_FILE' in os.environ:
-            del os.environ['SSL_CERT_FILE']
-
-        # Initialize color attributes
+        # Define color attributes
         self.uv_blue = "#00C3FF"
         self.uv_dark = "#121212"
         self.uv_light = "#FFFFFF"
         self.uv_gray = "#333333"
-        # Store analysis data
-        self.df = None
+
         # Initialize AWS client
         self.access_key = os.getenv("AWS_ACCESS_KEY_ID")
         self.secret_key = os.getenv("AWS_SECRET_ACCESS_KEY")
         self.bucket_name = os.getenv("BUCKET_NAME", "datalogs-processed-timeseries")
         self.aws_client = AWSClient(self.access_key, self.secret_key, self.bucket_name)
+
         # Initialize UI
         self.init_ui()
         self.apply_dark_theme()
         self.load_bike_details()
         self.update_ui_with_bike_details()
         self.populate_log_files()
-
-    def update_ui_with_bike_details(self):
-        """Update the UI with the bike details"""
-        if not self.bike_imei:
-            return
-        bike_text = f"{self.bike_details.get('make', 'Ultraviolette')} {self.bike_details.get('model', 'F77')}"
-        if self.bike_imei != 'N/A':
-            bike_text += f" | IMEI: {self.bike_imei}"
-        self.bike_info_label.setText(bike_text)
-        self.update_bike_details_sidebar()
-
-    def update_bike_details_sidebar(self):
-        """Update the bike details in the sidebar"""
-        for i in reversed(range(self.details_grid.count())):
-            widget = self.details_grid.itemAt(i).widget()
-            if widget:
-                widget.setParent(None)
-        row = 0
-        for label, value in [
-            ("VIN:", self.bike_vin),
-            ("IMEI:", self.bike_imei),
-            ("Model:", self.bike_details.get('model', 'F77')),
-            ("Year:", self.bike_details.get('year', '2023')),
-            ("Color:", self.bike_details.get('color', 'N/A'))
-        ]:
-            label_widget = QLabel(label)
-            label_widget.setFont(QFont("Montserrat", 9, QFont.Bold))
-            label_widget.setStyleSheet(f"color: {self.uv_light};")
-            value_widget = QLabel(str(value))
-            value_widget.setFont(QFont("Montserrat", 9))
-            value_widget.setStyleSheet(f"color: {self.uv_light};")
-            self.details_grid.addWidget(label_widget, row, 0)
-            self.details_grid.addWidget(value_widget, row, 1)
-            row += 1
-
-    def apply_dark_theme(self):
-        """Apply dark theme to the main window"""
-        palette = QPalette()
-        palette.setColor(QPalette.Window, QColor(18, 18, 18))
-        palette.setColor(QPalette.WindowText, QColor(255, 255, 255))
-        palette.setColor(QPalette.Base, QColor(51, 51, 51))
-        palette.setColor(QPalette.AlternateBase, QColor(18, 18, 18))
-        palette.setColor(QPalette.ToolTipBase, QColor(255, 255, 255))
-        palette.setColor(QPalette.ToolTipText, QColor(18, 18, 18))
-        palette.setColor(QPalette.Text, QColor(255, 255, 255))
-        palette.setColor(QPalette.Button, QColor(51, 51, 51))
-        palette.setColor(QPalette.ButtonText, QColor(255, 255, 255))
-        palette.setColor(QPalette.Link, QColor(0, 195, 255))
-        palette.setColor(QPalette.Highlight, QColor(0, 195, 255))
-        palette.setColor(QPalette.HighlightedText, QColor(18, 18, 18))
-        self.setPalette(palette)
-
-    def load_bike_details(self):
-        """Load bike details from Excel file by matching VIN/IMEI"""
-        self.bike_details = {
-            "vin": self.bike_vin or "UVXXXXXXX12345678",
-            "imei": self.bike_imei,
-            "make": "Ultraviolette",
-            "model": "F77",
-            "year": "2023",
-            "color": "Abyss Black",
-            "battery_capacity": "10.3 kWh",
-            "owner": "Demo Customer"
-        }
 
     def init_ui(self):
         """Initialize the main UI"""
@@ -376,6 +304,70 @@ class MainWindow(QMainWindow):
         content.setStretchFactor(1, 1)
         main_layout.addWidget(content)
 
+    def apply_dark_theme(self):
+        """Apply dark theme to the main window"""
+        palette = QPalette()
+        palette.setColor(QPalette.Window, QColor(18, 18, 18))
+        palette.setColor(QPalette.WindowText, QColor(255, 255, 255))
+        palette.setColor(QPalette.Base, QColor(51, 51, 51))
+        palette.setColor(QPalette.AlternateBase, QColor(18, 18, 18))
+        palette.setColor(QPalette.ToolTipBase, QColor(255, 255, 255))
+        palette.setColor(QPalette.ToolTipText, QColor(18, 18, 18))
+        palette.setColor(QPalette.Text, QColor(255, 255, 255))
+        palette.setColor(QPalette.Button, QColor(51, 51, 51))
+        palette.setColor(QPalette.ButtonText, QColor(255, 255, 255))
+        palette.setColor(QPalette.Link, QColor(0, 195, 255))
+        palette.setColor(QPalette.Highlight, QColor(0, 195, 255))
+        palette.setColor(QPalette.HighlightedText, QColor(18, 18, 18))
+        self.setPalette(palette)
+
+    def load_bike_details(self):
+        """Load bike details from Excel file by matching VIN/IMEI"""
+        self.bike_details = {
+            "vin": self.bike_vin or "UVXXXXXXX12345678",
+            "imei": self.bike_imei,
+            "make": "Ultraviolette",
+            "model": "F77",
+            "year": "2023",
+            "color": "Abyss Black",
+            "battery_capacity": "10.3 kWh",
+            "owner": "Demo Customer"
+        }
+
+    def update_ui_with_bike_details(self):
+        """Update the UI with the bike details"""
+        if not self.bike_imei:
+            return
+        bike_text = f"{self.bike_details.get('make', 'Ultraviolette')} {self.bike_details.get('model', 'F77')}"
+        if self.bike_imei != 'N/A':
+            bike_text += f" | IMEI: {self.bike_imei}"
+        self.bike_info_label.setText(bike_text)
+        self.update_bike_details_sidebar()
+
+    def update_bike_details_sidebar(self):
+        """Update the bike details in the sidebar"""
+        for i in reversed(range(self.details_grid.count())):
+            widget = self.details_grid.itemAt(i).widget()
+            if widget:
+                widget.setParent(None)
+        row = 0
+        for label, value in [
+            ("VIN:", self.bike_vin),
+            ("IMEI:", self.bike_imei),
+            ("Model:", self.bike_details.get('model', 'F77')),
+            ("Year:", self.bike_details.get('year', '2023')),
+            ("Color:", self.bike_details.get('color', 'N/A'))
+        ]:
+            label_widget = QLabel(label)
+            label_widget.setFont(QFont("Montserrat", 9, QFont.Bold))
+            label_widget.setStyleSheet(f"color: {self.uv_light};")
+            value_widget = QLabel(str(value))
+            value_widget.setFont(QFont("Montserrat", 9))
+            value_widget.setStyleSheet(f"color: {self.uv_light};")
+            self.details_grid.addWidget(label_widget, row, 0)
+            self.details_grid.addWidget(value_widget, row, 1)
+            row += 1
+
     def create_sidebar_button(self, text, is_active=False):
         """Create a styled sidebar button"""
         button = QPushButton(text)
@@ -470,6 +462,44 @@ class MainWindow(QMainWindow):
         """)
         self.log_files_list.itemClicked.connect(self.log_file_selected)
         left_layout.addWidget(self.log_files_list)
+
+        # Add Filter 20km Rides button
+        self.filter_button = QPushButton("Filter 20km Rides")
+        self.filter_button.setFont(QFont("Montserrat", 11))
+        self.filter_button.setCursor(Qt.PointingHandCursor)
+        self.filter_button.setStyleSheet("""
+            QPushButton {
+                background-color: #00C3FF;
+                color: #121212;
+                border: none;
+                border-radius: 4px;
+                padding: 10px 20px;
+            }
+            QPushButton:hover {
+                background-color: #33D1FF;
+            }
+        """)
+        self.filter_button.clicked.connect(self.filter_log_files)
+        left_layout.addWidget(self.filter_button)
+
+        # Add Refresh button
+        self.refresh_button = QPushButton("Refresh")
+        self.refresh_button.setFont(QFont("Montserrat", 11))
+        self.refresh_button.setCursor(Qt.PointingHandCursor)
+        self.refresh_button.setStyleSheet("""
+            QPushButton {
+                background-color: #333333;
+                color: #FFFFFF;
+                border: 1px solid #00C3FF;
+                border-radius: 4px;
+                padding: 10px 20px;
+            }
+            QPushButton:hover {
+                background-color: #444444;
+            }
+        """)
+        self.refresh_button.clicked.connect(self.populate_log_files)
+        left_layout.addWidget(self.refresh_button)
 
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
@@ -585,6 +615,52 @@ class MainWindow(QMainWindow):
         content_layout.addWidget(right_panel)
         run_analysis_layout.addLayout(content_layout)
 
+    def filter_log_files(self):
+        """Filter log files based on the 20km rides condition"""
+        self.log_files_list.clear()
+        if not self.bike_imei:
+            return
+
+        try:
+            # Fetch log files from AWS
+            log_files = self.aws_client.get_available_logs(self.bike_imei)
+            filtered_files = []
+
+            total_files = len(log_files)
+            self.progress_bar.setMaximum(total_files)
+            self.progress_bar.setValue(0)
+
+            for i, log_file in enumerate(log_files):
+                self.status_label.setText(f"Processing file {i+1} of {total_files}...")
+                QApplication.processEvents()
+
+                log_data = self.aws_client.download_log_file(log_file)
+                if not log_data:
+                    continue
+
+                df = self.aws_client.extract_archive(log_data)
+                if df is None or df.empty:
+                    continue
+
+                # Calculate the total distance for the log file
+                distance_arr = (np.array(df['millis'].diff()) * np.array(df['speed']))[1:].sum()
+                if distance_arr > 19:
+                    filtered_files.append(log_file)
+
+                self.progress_bar.setValue(i + 1)
+
+            self.status_label.setText("Filtering complete.")
+            self.log_files_list.clear()
+            for log_file in filtered_files:
+                display_name = log_file.split('/')[-1].replace('.parquet.zst', '.parquet')
+                item = QListWidgetItem(display_name)
+                item.setData(Qt.UserRole, log_file)
+                self.log_files_list.addItem(item)
+
+        except Exception as e:
+            logging.error(f"Error filtering log files: {str(e)}", exc_info=True)
+            self.status_label.setText("Failed to filter log files.")
+
     def populate_log_files(self):
         """Populate the log files list for the current IMEI"""
         self.log_files_list.clear()
@@ -605,47 +681,49 @@ class MainWindow(QMainWindow):
             self.status_label.setText("Failed to fetch log files from AWS.")
 
     def log_file_selected(self, item):
-        """Handle log file selection with flexible column validation"""
+        """Enhanced file selection handler with validation"""
         try:
-            # Get the full S3 key path from the item's data (not just text)
-            full_key = item.data(Qt.UserRole)  # Store full path as user data when populating
-            if not full_key:
-                # Fallback: Try to reconstruct from text (less reliable)
-                log_filename = item.text()
-                full_key = f"vcu/MD-{self.bike_imei}/{log_filename.replace('.parquet', '.parquet.zst')}"
-
+            full_key = item.data(Qt.UserRole)
+            print(f"\n[FILE SELECTED] Processing: {full_key}")
+            
+            # Download and extract
             self.analysis_stack.setCurrentIndex(1)
-            self.progress_bar.setValue(0)
-            self.status_label.setText("Downloading and extracting log file...")
-
-            # Download log file from AWS using full key path
+            self.status_label.setText("Downloading log file...")
             log_data = self.aws_client.download_log_file(full_key)
+            
             if not log_data:
-                raise ValueError("Failed to download log file.")
-
-            self.status_label.setText("Extracting log file...")
+                raise ValueError("Empty file downloaded from AWS")
+                
+            self.status_label.setText("Extracting and validating data...")
             df = self.aws_client.extract_archive(log_data)
-
-            # Validate columns
-            required_columns = {
-                'dsg_current', 'chg_current',
-                *[f'cell{i}' for i in range(1, 15)],
-                'max_soc',
-                *[f'ts{i}' for i in range(1, 13)],
-                'ts0_flt', 'ts13_flt'
+            
+            # Normalize and validate
+            df = normalize_column_names(df)
+            print(f"\n[COLUMNS FOUND] {df.columns.tolist()}")
+            
+            # Verify critical columns exist
+            required_cols = {
+                'temp': [f'ts{i}' for i in range(1, 13)] + ['ts0_flt', 'ts13_flt'],
+                'solder': ['dsg_current', 'chg_current'] + [f'cell{i}' for i in range(1, 15)],
+                'weld': ['max_soc']
             }
-            if not validate_columns(df, required_columns):
-                raise ValueError("Missing required columns in the log file.")
-
-            # Assign validated DataFrame to class attributes
+            
+            for analysis_type, cols in required_cols.items():
+                missing = [c for c in cols if c not in df.columns]
+                if missing:
+                    print(f"[WARNING] Missing {analysis_type} columns: {missing}")
+            
+            # Store and analyze
             self.df = df
-
-            # Start analysis thread
+            print("\n[DATA PREVIEW] First 3 rows:")
+            print(df.iloc[:3][[c for c in df.columns if c.startswith(('ts', 'cell'))]])
+            
             self.start_analysis_thread()
 
         except Exception as e:
-            self.show_error(f"Log processing failed: {str(e)}")
-            logging.error(f"Error processing log file: {str(e)}", exc_info=True)
+            error_msg = f"File Processing Error: {str(e)}"
+            print(f"[FILE ERROR] {error_msg}")
+            self.show_error(error_msg)
             self.analysis_stack.setCurrentIndex(0)
 
     def start_analysis_thread(self):
@@ -728,89 +806,86 @@ class MainWindow(QMainWindow):
         issues_layout.addStretch()
         self.results_widget_layout.addWidget(issues_frame)
 
-        # Create plots section if issues found
-        if any([solder_results["detected"], weld_results["detected"], temp_results["detected"]]):
-            plots_frame = QFrame()
-            plots_frame.setFrameShape(QFrame.StyledPanel)
-            plots_frame.setStyleSheet("background-color: #333333; border-radius: 6px; padding: 15px;")
-            plots_layout = QVBoxLayout(plots_frame)
-            plots_title = QLabel("Analysis Graphs")
-            plots_title.setFont(QFont("Montserrat", 14, QFont.Bold))
-            plots_title.setStyleSheet("color: #00C3FF;")
-            plots_layout.addWidget(plots_title)
+        # Create plots section
+        plots_frame = QFrame()
+        plots_frame.setFrameShape(QFrame.StyledPanel)
+        plots_frame.setStyleSheet("background-color: #333333; border-radius: 6px; padding: 15px;")
+        plots_layout = QVBoxLayout(plots_frame)
+        plots_title = QLabel("Analysis Graphs")
+        plots_title.setFont(QFont("Montserrat", 14, QFont.Bold))
+        plots_title.setStyleSheet("color: #00C3FF;")
+        plots_layout.addWidget(plots_title)
 
-            # Temperature plot (matches reference code)
-            if temp_results["detected"]:
-                fig = Figure(figsize=(8, 4), dpi=100)
-                ax = fig.add_subplot(111)
-                for sensor in self.df.columns:
-                    highlight = sensor in temp_results['critical_points']
-                    ax.plot(
-                        self.df.index,
-                        self.df[sensor],
-                        linewidth=3 if highlight else 1,
-                        alpha=1.0 if highlight else 0.3,
-                        label=sensor if highlight else None
-                    )
-                ax.set_title(f'IMEI {self.bike_imei} - Temperature Fluctuation - Sensor {", ".join(temp_results["critical_points"])}', fontsize=10)
-                ax.set_xlabel('Data Point Index', fontsize=8)
-                ax.set_ylabel('Temperature (°C)', fontsize=8)
-                ax.legend()
-                ax.grid(True)
-                canvas = FigureCanvas(fig)
-                canvas.mpl_connect('button_press_event', lambda event: self.open_enlarged_graph(event, fig, f'Temperature Fluctuation - Sensor {", ".join(temp_results["critical_points"])}', 'Data Point Index', 'Temperature (°C)', self.df.index, self.df[sensor]))
-                plots_layout.addWidget(canvas)
+        # Temperature plot
+        fig = Figure(figsize=(8, 4), dpi=100)
+        ax = fig.add_subplot(111)
+        temp_sensors = [col for col in self.df.columns if col.startswith('ts')]
+        for sensor in temp_sensors:
+            highlight = sensor in temp_results['critical_points']
+            ax.plot(
+                self.df.index,
+                self.df[sensor],
+                linewidth=3 if highlight else 1,
+                alpha=1.0 if highlight else 0.3,
+                label=sensor
+            )
+        ax.set_title(f'IMEI {self.bike_imei} - Temperature Fluctuation', fontsize=10)
+        ax.set_xlabel('Data Point Index', fontsize=8)
+        ax.set_ylabel('Temperature (°C)', fontsize=8)
+        ax.legend()
+        ax.grid(True)
+        canvas = FigureCanvas(fig)
+        canvas.mpl_connect('button_press_event', lambda event: self.open_enlarged_graph(event, fig, 'Temperature Fluctuation', 'Data Point Index', 'Temperature (°C)', self.df.index, self.df[temp_sensors]))
+        plots_layout.addWidget(canvas)
 
-            # Solder plot (matches reference code - shows all cells)
-            if solder_results["detected"]:
-                fig = Figure(figsize=(8, 4), dpi=100)
-                ax = fig.add_subplot(111)
-                cell_cols = [f'cell{i}' for i in range(1, 15)]
-                y_data = {}
-                for cell in cell_cols:
-                    highlight = cell in solder_results['locations']
-                    ax.plot(
-                        self.df.index,
-                        self.df[cell],
-                        linewidth=3 if highlight else 1,
-                        alpha=1.0 if highlight else 0.3,
-                        label=cell if highlight else None
-                    )
-                    y_data[cell] = self.df[cell]
-                ax.set_title(f'IMEI {self.bike_imei} - Solder Issue - Cells {", ".join(solder_results["locations"])}', fontsize=10)
-                ax.set_xlabel('Data Point Index', fontsize=8)
-                ax.set_ylabel('Voltage (V)', fontsize=8)
-                ax.legend()
-                ax.grid(True)
-                canvas = FigureCanvas(fig)
-                canvas.mpl_connect('button_press_event', lambda event: self.open_enlarged_graph(event, fig, f'Solder Issue - Cells {", ".join(solder_results["locations"])}', 'Data Point Index', 'Voltage (V)', self.df.index, y_data))
-                plots_layout.addWidget(canvas)
+        # Solder plot
+        fig = Figure(figsize=(8, 4), dpi=100)
+        ax = fig.add_subplot(111)
+        cell_cols = [f'cell{i}' for i in range(1, 15)]
+        y_data = {}
+        for cell in cell_cols:
+            highlight = cell in solder_results['locations']
+            ax.plot(
+                self.df.index,
+                self.df[cell],
+                linewidth=3 if highlight else 1,
+                alpha=1.0 if highlight else 0.3,
+                label=cell
+            )
+            y_data[cell] = self.df[cell]
+        ax.set_title(f'IMEI {self.bike_imei} - Solder Issue', fontsize=10)
+        ax.set_xlabel('Data Point Index', fontsize=8)
+        ax.set_ylabel('Voltage (V)', fontsize=8)
+        ax.legend()
+        ax.grid(True)
+        canvas = FigureCanvas(fig)
+        canvas.mpl_connect('button_press_event', lambda event: self.open_enlarged_graph(event, fig, 'Solder Issue', 'Data Point Index', 'Voltage (V)', self.df.index, y_data))
+        plots_layout.addWidget(canvas)
 
-            # Weld plot (matches reference code - highlights single cell)
-            if weld_results["detected"]:
-                fig = Figure(figsize=(8, 4), dpi=100)
-                ax = fig.add_subplot(111)
-                cell_cols = [f'cell{i}' for i in range(1, 15)]
-                faulty_cell = weld_results.get('cell_with_issue')
-                for cell in cell_cols:
-                    if cell == faulty_cell:
-                        ax.plot(
-                            self.df.index,
-                            self.df[cell],
-                            linewidth=3,
-                            label=cell
-                        )
-                ax.set_title(f'IMEI {self.bike_imei} - Weld Issue - Cell {faulty_cell}', fontsize=10)
-                ax.set_xlabel('Data Point Index', fontsize=8)
-                ax.set_ylabel('Voltage (V)', fontsize=8)
-                ax.legend()
-                ax.grid(True)
-                ax.text(0.02, 0.02, f'SOC: {self.df["max_soc"].iloc[0]}%', transform=ax.transAxes, fontsize=8)
-                canvas = FigureCanvas(fig)
-                canvas.mpl_connect('button_press_event', lambda event: self.open_enlarged_graph(event, fig, f'Weld Issue - Cell {faulty_cell}', 'Data Point Index', 'Voltage (V)', self.df.index, self.df[cell]))
-                plots_layout.addWidget(canvas)
+        # Weld plot
+        fig = Figure(figsize=(8, 4), dpi=100)
+        ax = fig.add_subplot(111)
+        cell_cols = [f'cell{i}' for i in range(1, 15)]
+        for cell in cell_cols:
+            highlight = cell == weld_results.get('cell_with_issue')
+            ax.plot(
+                self.df.index,
+                self.df[cell],
+                linewidth=3 if highlight else 1,
+                alpha=1.0 if highlight else 0.3,
+                label=cell
+            )
+        ax.set_title(f'IMEI {self.bike_imei} - Weld Issue', fontsize=10)
+        ax.set_xlabel('Data Point Index', fontsize=8)
+        ax.set_ylabel('Voltage (V)', fontsize=8)
+        ax.legend()
+        ax.grid(True)
+        ax.text(0.02, 0.02, f'SOC: {self.df["max_soc"].iloc[0]}%', transform=ax.transAxes, fontsize=8)
+        canvas = FigureCanvas(fig)
+        canvas.mpl_connect('button_press_event', lambda event: self.open_enlarged_graph(event, fig, 'Weld Issue', 'Data Point Index', 'Voltage (V)', self.df.index, self.df[cell_cols]))
+        plots_layout.addWidget(canvas)
 
-            self.results_widget_layout.addWidget(plots_frame)
+        self.results_widget_layout.addWidget(plots_frame)
 
         self.analysis_stack.setCurrentIndex(2)
 
